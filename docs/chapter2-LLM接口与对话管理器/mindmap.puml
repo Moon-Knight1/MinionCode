@@ -1,0 +1,65 @@
+@startmindmap
++ MinionCode 基础设施构建
+
+++ 一、 Messages 消息格式与限制
++++ 角色交替限制 (Roles Alternate)
+++++ role 仅包含 user 与 assistant 两种基本角色
+++++ 必须保持严格的交替出现顺序（User -> Assistant）
+++++ 避坑：工具返回结果必须作为 user 角色发回，连续发送 assistant 会导致 API 报错拒绝
++++ 内容块数组 (Content Blocks)
+++++ 响应体中的 content 永远是一个数组，而非单字符串
+++++ 核心设计：支持单次回复包含多种形态（如：先 text 文本，后触发 tool_use 工具调用）
+
+++ 二、 流式响应（Streaming）与 SSE 协议
++++ 传输协议：基于 Server-Sent Events (SSE) 长连接协议，避免界面白屏挂起
++++ SSE 事件标准序列
+++++ message_start：整个响应开始，携带 input_tokens 信息
+++++ content_block_start：一个内容块（文本或工具调用）开始
+++++ content_block_delta：核心消费点，实时接收文字增量并推给 UI 显示
+++++ content_block_stop：当前内容块结束
+++++ message_delta：消息级增量，提取 output_tokens 信息及 stop_reason 停止原因
+++++ message_stop：整个长连接响应结束，干净释放连接
+
+++ 三、 请求体的三个抽屉
++++ system：角色设定与环境感知（如当前操作系统、工作目录、系统时间），会话内相对固定
++++ messages：动态上下文与对话历史
++++ tools：声明 Agent 当前可用的工具列表及 Schema 描述（Function Calling）
+
+-- 四、 Token 计费与钱包陷阱
+--- 成本天平：输出 Token (output_tokens) 价格通常是输入 Token (input_tokens) 的 5 倍
+--- 线性增长陷阱
+++++ LLM 本身无状态，多轮对话全靠每次请求时全量带上完整历史来实现记忆
+++++ 输入 Token 随对话轮次呈线性暴涨 O(N)，后续必须引入上下文压缩机制
+--- Extended Thinking（思考模型）
+++++ 优点：生成 thinking 块用于内部推理，用钱换取更准确的工具调用决策
+++++ 避坑：thinking 的 Token 算在输出计费中，且不能放进后续请求的 messages 历史中（必须过滤掉）
+
+-- 五、 架构层设计：解耦与双层模型
+--- LLM Client 适配层封装
+++++ 原则：暴露领域语义，隐藏实现细节，对底层厂商 SDK 强解耦
+++++ 解耦核心配置：protocol（协议类型）、model（模型）、base_url（端点地址）、api_key（认证凭证）
+--- 两层消息模型 (Message Models)
+++++ API 层：极简的 role + content，专用于网络通信
+++++ 内部层：
++++++ 丰富角色：扩展为 user、assistant、system、tool
++++++ 唯一标识：带上消息 ID，流式追加文字时通过 ID 精确追踪更新
++++++ 状态机管理：包含 streaming（接收中）、complete（完成）、error（出错）等生命周期状态
+--- 对话管理器 (Conversation Manager)
+++++ 职责：包装消息列表，内部处理锁或异步单线程以保证并发安全（防止数据竞争）
+++++ toAPIFormat() 管道转换内容：
++++++ 1. 过滤：剔除内部特有的 system 欢迎语及 error 状态消息
++++++ 2. 合并：主动合并相邻的同角色消息，减少冗余
++++++ 3. 校验：确保转换后首条消息为 User 且角色严格交替
+
+-- 六、 多轮对话循环流水线
+--- 1. 用户输入 -> 加入对话管理器 (Status: complete)
+--- 2. 预创建空 Assistant 消息 -> 拿到唯一 Id (Status: streaming)
+--- 3. 调用 toAPIFormat() -> 提炼出干净的 API 请求体
+--- 4. 异步请求 LLM -> 消费 SSE 事件流，根据 Id 实时追加文本 -> 最终触发 done 更改状态为 complete 并记录 Token 用量
+
+-- 七、 终端界面（TUI）最终形态
+--- 上方：对话渲染区（流式滚动输出历史与回复）
+--- 下方：分屏交互输入框（用户输入指令/代码需求）
+--- 底部：状态栏（展示当前激活模型、Token 实时用量与运行耗时）
+
+@endmindmap

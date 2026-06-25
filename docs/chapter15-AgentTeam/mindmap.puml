@@ -1,0 +1,75 @@
+@startmindmap
++ MinionCode 团队协同系统
+
+++ 一、 从 SubAgent 到 Agent Team
++++ 演进痛点
+++++ 星型拓扑限制：子 Agent 只能与主 Agent（Lead）通信，信息串行中转导致 Lead 成为全局瓶颈
+++++ 上下文污染：多个不相干的子任务混在同个窗口，重构过程的中间 diff 和报错严重干扰后续编码
++++ 空间并行进化
+++++ 依托 Git Worktree 的空间多目录并行能力，使多 Agent 团队协作（Agent Team）成为可能
+++++ 拓扑转变：网状去中心化结构，队员有独立上下文、可直接寻址、通过工具自发认领并协作推进任务
++++ 核心设计哲学
+++++ 去中心化：协调能力以工具形式注入，框架不充当硬性状态机裁判，将流转决策完全交给 LLM 自由判断
+
+++ 二、 团队核心结构与三种执行后端
++++ 数据结构架构
+++++ 团队对象：维护团队名（name）、Lead实例（lead）、共享任务列表（tasks）与花名册（members）
+++++ 队员对象：TeammateInfo 记录别名（name）、类型、独占工作树路径与活跃状态（isActive）
+++++ 销毁逻辑：无 terminated 墓碑状态，队员终止后直接从 members 列表移除，保持清理逻辑极简
++++ 三种执行后端 (自动按优先级检测)
+++++ 1. Tmux 后端：已在 tmux 环境中或本地装有 tmux 时启用。每个队员在独立终端 pane 内以子进程运行，完全隔离，防单点崩溃
+++++ 2. iTerm2 后端：macOS 环境且装有 it2 工具时启用。调用 iTerm2 原生 split pane 派生子进程，提供对等的完全进程隔离
+++++ 3. In-process 后端：兜底轻量级选项。同进程内运行，共享 Lead 生命周期（Lead 退出则团队殉爆），禁止派生后台子 Agent
+
+++ 三、 异步文件邮箱与直接通信 (SendMessage)
++++ 共享文件邮箱机制
+++++ 媒介与轮询：非网络 RPC 直连，基于磁盘共享 mailbox 文件，通过 500ms 轮询在下一轮 Loop 开头读入
+++++ 文件锁防御：配有排他锁（lock file）及 5-100ms 随机退避重试，防并发写撞车；10s 超时强制破锁防死锁
++++ SendMessage 通信原语
+++++ 参数规约：接收方（to）支持名称路由（利用注册表解析）与 "*" 全局广播；发送时强制附带 5-10 词简短摘要供 Lead 审计
+++++ 结构化控制消息：shutdown_request（请求优雅退出）、shutdown_response（响应退出）、plan_approval_response（计划审批）
++++ 计划审批工作流 (Plan Approval)
+++++ 规则：针对高风险队员配置 planModeRequired，强力剥夺其直接动手写代码的默认倾向
+++++ 闭环：队员写计划 -> 邮箱发至 Lead -> Lead 通过专用控制消息审批（Approve 放行 / Reject 并带上具体反馈）
+
+-- 四、 团队完整生命周期五阶段
+--- 1. 创建 (Setup)
+++++ 调用顶层 TeamCreate 工具，构建团队目录、初始化配置 json、支起共享任务列表摊子并注册 Lead
+--- 2. 分解 (Decompose)
+++++ Lead 结合用户目标自主推演，利用 TaskCreate 拆分出相互并行的原子任务，利用 addBlockedBy 注入系统级依赖图
+--- 3. 执行 (Execute)
+++++ 派生多后端的独立队员 -> 自动为队员注入附录强指令（警告其纯文本对队友不可见，跨队员通信必须用 SendMessage）
+++++ 队员进入 ReAct 自主 Loop：查任务列表 -> 结合自身上下文与位置动态认领 -> 独立 Worktree 空间干活 -> 更新状态
+--- 4. 收敛 (Merge)
+++++ 任务全部合拢后 Lead 重新登场 -> 亲手调用 Bash 跑 git merge/cherry-pick 进行语义层面的冲突消解与回归测试
+--- 5. 清理 (Teardown)
+++++ 活干完后一键拆掉脚手架：终止残存队员、强制拔除 Worktree 物理目录、抹去临时任务痕迹，实现 Fail-safe 干净退出
+
+-- 五、 空闲挂起与续写循环
+--- 自动停靠 (Idle)
+++++ 队员 runToCompletion 结束（LLM 仅回文本、不调工具）时判定完工，触发通知并标记 isActive: false 进入空闲挂起
+--- 动态复活 (Resume)
+++++ 磁盘上的对话记录会被完好持久化。Lead 随时可再度通过 SendMessage 派发新指令，跨进程无缝唤醒并“续写”上下文
+
+-- 六、 冲突预防与任务分解策略
+--- 分解四项原则
+++++ 原则 1：按文件物理边界分任务，若有重合则通过 addBlockedBy 强行挂在依赖链上进行串行隔离
+++++ 原则 2：控制负载，每个队员排 2-4 个任务最合适，过多会导致 LLM 选单纠结
+++++ 原则 3：明确系统级显式依赖，杜绝让模型自行推断隐含顺序
+++++ 原则 4：尾部强制预留验证任务，卡死编译、全量单测与 Lint 门禁
+--- 三层冲突预防
+++++ 物理层 Worktree 路径死锁隔离 -> 规划层 Lead 严格按文件切分 -> 收敛层 Lead 自行消化并人工兜底
+
+-- 七、 协调者模式 (Coordinator Mode)
+--- 激活前置双重锁
+++++ 包含配置文件的 COORDINATOR_MODE 特征标记（功能开放开关）与 MEWCODE_COORDINATOR_MODE 环境变量（用户显式意图）
+--- 极限限权与职责内聚
+++++ 原理：长链复杂任务中 Lead 一心二用会污染主上下文并导致主仓库死锁，需强行剥夺其直接改写代码的权力
+++++ 工具截断：封杀 WriteFile/EditFile 等写类工具，仅保留队员管理、任务分配、SendMessage 消息与必要的读类/Git合流工具
+--- 四阶段流水线工作流
+++++ 阶段 1 (Research)：队员并行探索定位代码库 -> 阶段 2 (Synthesis)：**Lead 亲力亲写核心实施规格 (Spec)**
+++++ 阶段 3 (Implementation)：队员领走 Spec 落地修改 -> 阶段 4 (Verification)：Verification Agent 团队执行终态单测验证
+--- 结果接收通知
+++++ 后台队员完工后，TaskManager 统一向主历史发送带特定 XML 标签的 <task-notification> 块，驱使 Lead 展开续写评审
+
+@endmindmap

@@ -1,0 +1,61 @@
+@startmindmap
++ MinionCode 核心循环 (Agent Loop)
+
+++ 一、 ReAct 范式理论与映射
++++ 核心思想：想一步做一步 (Think -> Act -> Observe)
++++ 范式对比
+++++ Chain of Thought：只推理不行动，无法与环境交互
+++++ Act only：只行动不推理，盲目调工具易出错
+++++ Plan then Execute：先计划再执行，计划易过时不够灵活
+++++ ReAct：推理与行动交替，最契合边想边做的编程特性
++++ API 映射机制
+++++ 推理 (Think)：映射为 Assistant 消息中的 text 流式文本
+++++ 行动 (Act)：映射为 Assistant 消息中的 tool_use 块
+++++ 观察 (Observe)：映射为 User 消息中的 tool_result 块
+
+++ 二、 Agent Loop 循环核心实现
++++ 机制本质：一个 while 循环加数次 API 调用
++++ 基础数据流向
+++++ 发送完整对话历史 -> 接收模型流式响应 -> 解析推理与行动建议 -> 本地执行工具 -> 将结果拼接回历史 -> 开启下一轮
++++ 消息拼接约束
+++++ assistant 的 text 与 tool_use 内容块必须保持在同一条消息内
+++++ tool_result 必须以 user 角色发送，且 id 一一对应配对
+
+++ 三、 状态机思维与分批逻辑
++++ 状态机转换
+++++ 每一轮 LLM 响应后只有两条路：继续循环 (CONTINUE) 或终止循环 (TERMINAL)
+++++ 集中收拢判断逻辑，便于未来扩展新状态（如需用户确认、限流暂停等）
++++ 工具调用分批 (partitionToolCalls)
+++++ 依据工具的 isConcurrencySafe 属性，对单次 turn 内的多个调用进行自动分区
+++++ 并发批次 (runConcurrently)：天然只读工具（如 ReadFile, Grep, Glob）同时跑，加速 IO
+++++ 串行批次 (runSerially)：写操作或副作用命令（如 Bash, EditFile）排队跑，确保隔离安全
+
+-- 四、 严格的循环停止条件（安全网）
+--- 1. 模型主动结束
+++++ 响应中 stop_reason 为 end_turn 且不含任何 tool_use
+--- 2. 迭代上限截断
+++++ 设置最大循环次数（如 50 次），防止模型陷入死循环导致 API 费用暴涨
+--- 3. 用户主动取消
+++++ 用户按 Esc 发送取消信号，Loop 在每轮循环开始前检测信号并干净退出（不退出程序）
+++++ 各语言机制：Go 使用 context，Python 使用 asyncio 取消，TS 使用 AbortController，Rust 使用 CancellationToken
+--- 4. 异常状态防御
+++++ 连续多次请求不存在或已禁用的工具时，判定模型迷失，提前终止循环
+
+-- 五、 事件流模式 (AgentEvent)
+--- 设计原则：通过异步事件流实现 Agent 引擎与 UI 层的完全解耦
+--- 事件类型划分
+++++ 文本流类：stream_text（实时文字增量）
+++++ 工具生命周期：tool_use（工具调用请求）、tool_result（执行完成与耗时）
+++++ 状态控制类：turn_complete（单轮调用完成）、loop_complete（整个循环结束）
+++++ 元数据审计：usage（累计 Token 消耗）、error（系统级异常）
+
+-- 六、 System Prompt 与规划模式
+--- 动态环境信息注入
+++++ 在 System 参数中声明当前工作目录（CWD）、操作系统（OS）和当前时间
+++++ 为模型解析路径与选用命令提供依据，且利于复用 Prompt Cache
+--- 规划模式 (Plan Mode)
+++++ 核心原理：通过强 Prompt 指令约束模型行为，而非生硬禁用工具
+++++ 权限矩阵：保持与默认模式一致（读允许，写/命令提示确认），赋予探索灵活性
+++++ 特殊策略：指定 plan 规划文件自动放行写入，LLM 违规写其他文件仍会被安全层拦截
+
+@endmindmap
